@@ -1,0 +1,139 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Build channel (dev uses draft core libs; prod uses release core)"
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      targets:
+        description: "Package targets to build"
+        type: choice
+        options:
+          - zip
+          - zip,exe
+          - zip,exe,msix
+        default: zip,exe
+
+env:
+  IS_GITHUB_ACTIONS: 1
+  CHANNEL: ${{ inputs.channel }}
+  FLUTTER_VERSION: "3.38.5"
+  TARGET_NAME_exe: "Hiddify-Windows-Setup-x64"
+  TARGET_NAME_msix: "Hiddify-Windows-x64"
+  TARGET_NAME_zip: "Hiddify-Windows-Portable-x64"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2.21.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Setup dependencies
+        shell: bash
+        run: |
+          choco install make --yes
+          make windows-install-deps
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          # Inno Setup is required for the exe installer target
+          if [[ "${{ inputs.targets }}" == *"exe"* ]]; then
+            choco install innosetup -y
+            echo "C:/Program Files (x86)/Inno Setup 6" >> "$GITHUB_PATH"
+          fi
+
+      - name: Setup Windows signing (optional)
+        if: ${{ secrets.WINDOWS_SIGNING_KEY != '' }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("windows\sign.pfx", [Convert]::FromBase64String("${{ secrets.WINDOWS_SIGNING_KEY }}"))
+          (Get-Content "windows\packaging\msix\make_config.yaml") `
+            -replace '^certificate_password:.*$', 'certificate_password: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}' `
+            | Set-Content "windows\packaging\msix\make_config.yaml"
+
+      - name: Prepare Windows
+        shell: bash
+        run: make windows-prepare
+
+      - name: Build Windows packages
+        shell: bash
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra TARGETS <<< "${{ inputs.targets }}"
+          for target in "${TARGETS[@]}"; do
+            target="$(echo "$target" | xargs)"
+            case "$target" in
+              zip)
+                make windows-zip-release
+                ;;
+              exe)
+                make windows-exe-release
+                ;;
+              msix)
+                if [[ ! -f windows/sign.pfx ]]; then
+                  echo "Skipping msix: windows/sign.pfx is missing (set WINDOWS_SIGNING_KEY secret to enable)."
+                  continue
+                fi
+                make windows-msix-release
+                ;;
+              *)
+                echo "Unknown target: $target"
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Code sign (optional)
+        if: ${{ secrets.WINDOWS_SIGNING_KEY != '' }}
+        uses: hiddify/signtool-code-sign-sha256@main
+        with:
+          certificate: "${{ secrets.WINDOWS_SIGNING_KEY }}"
+          cert-password: "${{ secrets.WINDOWS_SIGNING_PASSWORD }}"
+          cert-sha1: "${{ secrets.WINDOWS_SIGNING_SHA1 }}"
+          folder: dist
+          timestamp-server: http://timestamp.digicert.com
+          recursive: true
+          description: Hiddify
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "out" -Force | Out-Null
+          Get-ChildItem -Path dist -Recurse | Select-Object FullName
+          $targets = "${{ inputs.targets }}".Split(',')
+          foreach ($ext in $targets) {
+            $ext = $ext.Trim()
+            if (-not $ext) { continue }
+            $key = "TARGET_NAME_$ext"
+            $targetName = [Environment]::GetEnvironmentVariable($key)
+            if (-not $targetName) { continue }
+            $files = Get-ChildItem -Path dist -Recurse -Filter "*.$ext" -ErrorAction SilentlyContinue
+            foreach ($file in $files) {
+              $destination = Join-Path -Path "out" -ChildPath "$targetName.$ext"
+              Move-Item -Path $file.FullName -Destination $destination -Force
+            }
+          }
+          Get-ChildItem -Path out
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hiddify-windows-x64
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
