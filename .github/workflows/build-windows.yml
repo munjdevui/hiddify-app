@@ -1,0 +1,84 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev
+      - cursor/windows-build-workflow-ce70
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+env:
+  IS_GITHUB_ACTIONS: 1
+  CHANNEL: dev
+  FLUTTER_VERSION: "3.38.5"
+  TARGET_NAME_exe: "Hiddify-Windows-Setup-x64"
+  TARGET_NAME_zip: "Hiddify-Windows-Portable-x64"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2.21.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Setup dependencies
+        shell: bash
+        run: |
+          choco install make innosetup --yes
+          make windows-install-deps
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          echo "C:/Program Files (x86)/Inno Setup 6" >> "$GITHUB_PATH"
+
+      - name: Prepare Windows
+        shell: bash
+        run: make windows-prepare
+
+      - name: Build Windows portable and setup
+        shell: bash
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          make windows-zip-release
+          make windows-exe-release
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "out" -Force | Out-Null
+          Get-ChildItem -Path dist -Recurse | Select-Object FullName
+          $map = @{
+            zip = $env:TARGET_NAME_zip
+            exe = $env:TARGET_NAME_exe
+          }
+          foreach ($ext in $map.Keys) {
+            $files = Get-ChildItem -Path dist -Recurse -Filter "*.$ext" -ErrorAction SilentlyContinue
+            foreach ($file in $files) {
+              $destination = Join-Path -Path "out" -ChildPath "$($map[$ext]).$ext"
+              Move-Item -Path $file.FullName -Destination $destination -Force
+            }
+          }
+          if (-not (Get-ChildItem -Path out -ErrorAction SilentlyContinue)) {
+            throw "No Windows artifacts were produced in out/"
+          }
+          Get-ChildItem -Path out
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hiddify-windows-x64
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
