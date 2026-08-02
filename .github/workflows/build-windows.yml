@@ -18,14 +18,22 @@ on:
           - zip,exe
           - zip,exe,msix
         default: zip,exe
+  push:
+    branches:
+      - dev
+      - cursor/windows-build-workflow-ce70
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
 
 env:
   IS_GITHUB_ACTIONS: 1
-  CHANNEL: ${{ inputs.channel }}
+  CHANNEL: ${{ inputs.channel || 'dev' }}
   FLUTTER_VERSION: "3.38.5"
   TARGET_NAME_exe: "Hiddify-Windows-Setup-x64"
   TARGET_NAME_msix: "Hiddify-Windows-x64"
   TARGET_NAME_zip: "Hiddify-Windows-Portable-x64"
+  BUILD_TARGETS: ${{ inputs.targets || 'zip,exe' }}
 
 jobs:
   build-windows:
@@ -50,7 +58,7 @@ jobs:
           make windows-install-deps
           echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
           # Inno Setup is required for the exe installer target
-          if [[ "${{ inputs.targets }}" == *"exe"* ]]; then
+          if [[ "${{ env.BUILD_TARGETS }}" == *"exe"* ]]; then
             choco install innosetup -y
             echo "C:/Program Files (x86)/Inno Setup 6" >> "$GITHUB_PATH"
           fi
@@ -74,7 +82,7 @@ jobs:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
           set -euo pipefail
-          IFS=',' read -ra TARGETS <<< "${{ inputs.targets }}"
+          IFS=',' read -ra TARGETS <<< "${{ env.BUILD_TARGETS }}"
           for target in "${TARGETS[@]}"; do
             target="$(echo "$target" | xargs)"
             case "$target" in
@@ -115,7 +123,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path "out" -Force | Out-Null
           Get-ChildItem -Path dist -Recurse | Select-Object FullName
-          $targets = "${{ inputs.targets }}".Split(',')
+          $targets = "${{ env.BUILD_TARGETS }}".Split(',')
           foreach ($ext in $targets) {
             $ext = $ext.Trim()
             if (-not $ext) { continue }
