@@ -304,7 +304,7 @@ windows-zip-release:
 	mkdir -p Hiddify; \
 	unzip -q "$$ZIP_FILE" -d Hiddify/; \
 	rm "$$ZIP_FILE"; \
-	tar -a -cf "$$FILE_NAME.zip" Hiddify; \
+	python -c "import shutil; shutil.make_archive('$$FILE_NAME', 'zip', root_dir='.', base_dir='Hiddify')"; \
 	rm -rf Hiddify; \
 	$(GREEN)Successful$(DONE)
 
